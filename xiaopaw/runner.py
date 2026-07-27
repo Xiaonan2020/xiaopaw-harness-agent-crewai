@@ -3,6 +3,7 @@
 v3 integration: Hook framework fires 5+2 events around agent execution.
 """
 
+
 from __future__ import annotations
 
 import asyncio
@@ -11,14 +12,21 @@ import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
-from xiaopaw.feishu.session_key import routing_type
 from xiaopaw.hook_framework.crew_adapter import CrewObservabilityAdapter, set_current_adapter
 from xiaopaw.hook_framework.registry import EventType, GuardrailDeny, HookContext, HookRegistry
 from xiaopaw.models import InboundMessage, SenderProtocol
-from xiaopaw.observability.metrics import agent_latency, inbound_total
+from xiaopaw.observability.metrics import (
+    observe_agent_latency,
+    record_error,
+    record_external_api_retry,
+    routing_key_type,
+    set_runner_queue_size,
+    set_runner_workers,
+)
 from xiaopaw.observability.trace import bind_trace_id
 from xiaopaw.session.manager import SessionManager
 from xiaopaw.session.models import MessageEntry
+from xiaopaw.feishu.downloader import FeishuDownloader, _build_attachment_message
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +44,7 @@ class Runner:
         session_mgr: SessionManager,
         sender: SenderProtocol,
         agent_fn: AgentFn,
+        downloader: FeishuDownloader| None = None,
         idle_timeout: float = 300.0,
         max_queue_size: int = 10,
         data_dir: Path | None = None,
@@ -45,6 +54,7 @@ class Runner:
         self._sender = sender
         self._agent_fn = agent_fn
         self._idle_timeout = idle_timeout
+        self._downloader = downloader
         self._max_queue_size = max_queue_size
         self._data_dir = data_dir or Path("data")
 
@@ -64,6 +74,7 @@ class Runner:
 
         async with self._dispatch_lock:
             key = inbound.routing_key
+            rkt = routing_key_type(key)
             if key not in self._queues:
                 self._queues[key] = asyncio.Queue(maxsize=self._max_queue_size)
                 self._queue_gen[key] = 0
@@ -74,6 +85,7 @@ class Runner:
                 return
 
             await q.put(inbound)
+            set_runner_queue_size(rkt, q.qsize())
 
             if key not in self._workers or self._workers[key].done():
                 self._queue_gen[key] += 1
@@ -81,9 +93,11 @@ class Runner:
                 self._workers[key] = asyncio.create_task(
                     self._worker(key, gen), name=f"worker-{key}"
                 )
+                set_runner_workers(rkt, 1)
 
     async def _worker(self, key: str, gen: int) -> None:
         logger.info("worker started: %s (gen=%d)", key, gen)
+        rkt = routing_key_type(key)
         try:
             while True:
                 try:
@@ -93,15 +107,18 @@ class Runner:
                 except asyncio.TimeoutError:
                     break
 
+                set_runner_queue_size(rkt, self._queues[key].qsize())
                 await self._handle(inbound)
 
-        except Exception:
+        except Exception as exc:
             logger.exception("worker error: %s", key)
+            record_error("runner", type(exc).__name__)
         finally:
             if self._queue_gen.get(key) == gen:
                 self._workers.pop(key, None)
                 self._queues.pop(key, None)
                 self._queue_gen.pop(key, None)
+                set_runner_workers(rkt, 0)
                 logger.info("worker exited: %s (gen=%d, cleaned up)", key, gen)
             else:
                 logger.info("worker exited: %s (gen=%d, superseded)", key, gen)
@@ -132,12 +149,32 @@ class Runner:
                     session_id=session.id,
                 )
 
+            # 附件下载
+            user_content = inbound.content
+            if inbound.attachment and self._downloader:
+                sandbox_path = (
+                    f"/workspace/sessions/{session.id}/uploads/"
+                    f"{inbound.attachment.file_name}"
+                )
+                local_path = await self._downloader.download_attachment(
+                    inbound.msg_id, inbound.attachment, session.id
+                )
+                if local_path is not None:
+                    user_content = _build_attachment_message(
+                        sandbox_path=sandbox_path,
+                        original_text=inbound.content,
+                    )
+                else:
+                    user_content = f"[附件下载失败] {inbound.content}".strip()
+
+
             # Hook: BEFORE_TURN —— 触发 structured_log + langfuse_trace 创建 trace
             if adapter:
                 adapter.on_turn_start(
-                    user_message=inbound.content,
+                    user_message=user_content, # 附件下载后的内容
                     sender_id=inbound.sender_id,
                 )
+
 
             # Load history
             history = await self._session_mgr.load_history(session.id)
@@ -156,7 +193,7 @@ class Runner:
             if adapter:
                 adapter.on_before_tool_call(
                     tool_name="agent_execution",
-                    tool_input={"content": inbound.content[:500]},
+                    tool_input={"content": user_content[:500]}, # 附件下载后的内容
                 )
                 if adapter._pending_deny:
                     pending = adapter._pending_deny
@@ -167,7 +204,8 @@ class Runner:
             adapter_token = set_current_adapter(adapter) if adapter else None
             try:
                 reply = await self._agent_fn(
-                    inbound.content,
+                    # inbound.content,
+                    user_content, # 附件下载后的内容
                     history,
                     session.id,
                     key,
@@ -181,7 +219,7 @@ class Runner:
             if adapter:
                 adapter.on_after_tool_call(
                     tool_name="agent_execution",
-                    tool_input={"content": inbound.content[:500]},
+                    tool_input={"content": user_content[:500]}, # 附件下载后的内容
                     tool_result=reply[:500],
                 )
 
@@ -194,14 +232,15 @@ class Runner:
             # Persist conversation
             await self._session_mgr.append(
                 session.id,
-                user=inbound.content,
+                #user=inbound.content,
+                user=user_content, # 附件下载后的内容
                 feishu_msg_id=inbound.msg_id,
                 assistant=reply,
                 ts=inbound.ts,
             )
 
             elapsed = time.monotonic() - start
-            agent_latency.labels(routing_type=routing_type(key)).observe(elapsed)
+            observe_agent_latency(key, elapsed)
 
             # Hook: AFTER_TURN
             if adapter and self._hook_registry:
@@ -213,7 +252,7 @@ class Runner:
                         sender_id=inbound.sender_id,
                         duration_ms=elapsed * 1000,
                         metadata={
-                            "user_message": inbound.content[:500],
+                            "user_message": user_content[:500], # 附件下载后的内容
                             "reply": reply[:500],
                         },
                     ),
@@ -226,6 +265,7 @@ class Runner:
             #   2. main_crew 内部 step_callback / task_callback 重抛
             #   3. cleanup() 时的 SESSION_END handler
             elapsed = time.monotonic() - start
+            observe_agent_latency(key, elapsed)
             logger.warning("guardrail deny for %s: %s", key, deny)
             deny_reply = f"安全策略拦截：{deny.detail or deny.reason_code}"
 
@@ -238,7 +278,7 @@ class Runner:
                         sender_id=inbound.sender_id,
                         duration_ms=elapsed * 1000,
                         metadata={
-                            "user_message": inbound.content[:500],
+                            "user_message": user_content[:500], # 附件下载后的内容
                             "reply": deny_reply,
                             "guardrail_deny": True,
                             "deny_reason": deny.reason_code,
@@ -254,7 +294,10 @@ class Runner:
                     await self._sender.send_text(key, deny_reply)
             except Exception:
                 pass
-        except Exception:
+        except Exception as exc:
+            elapsed = time.monotonic() - start
+            observe_agent_latency(key, elapsed)
+            record_error("runner", type(exc).__name__)
             logger.exception("handle error for %s", key)
             error_reply = "抱歉，处理消息时出现了错误，请稍后重试。"
             try:

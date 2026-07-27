@@ -65,7 +65,8 @@ class SessionManager:
             }
         tmp = self._index_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.rename(self._index_path)
+        tmp.replace(self._index_path)
+        # ↑ 用 replace 替代 rename：Windows 上 rename 目标已存在会报错，replace 会原子覆盖
 
     async def get_or_create(self, routing_key: str) -> SessionEntry:
         async with self._index_lock:

@@ -6,11 +6,14 @@ import asyncio
 import logging
 import os
 import signal
+import sys
 from pathlib import Path
 
 from xiaopaw.config.safety import assert_all_production_safe
 from xiaopaw.config.validator import load_config
 from xiaopaw.observability.logging_config import setup_logging
+from xiaopaw.config.write_credentials import write_baidu_credentials, write_feishu_credentials
+from xiaopaw.feishu.downloader import FeishuDownloader
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +38,6 @@ async def main() -> None:
     from xiaopaw.api.capture_sender import CaptureSender
     from xiaopaw.cleanup.service import CleanupService
     from xiaopaw.cron.service import CronService
-    from xiaopaw.cron.storage import CronStorage
     from xiaopaw.hook_framework.loader import HookLoader
     from xiaopaw.hook_framework.registry import HookRegistry
     from xiaopaw.observability.metrics_server import start_metrics_server
@@ -51,6 +53,10 @@ async def main() -> None:
     workspace_dir = Path(cfg.workspace)
     workspace_dir.mkdir(parents=True, exist_ok=True)
     ctx_dir = data_dir / "ctx"
+    
+    # 写入凭证到沙盒 .config 目录（凭证不经过 LLM）
+    write_feishu_credentials(data_dir, cfg.feishu.app_id, cfg.feishu.app_secret)
+    write_baidu_credentials(data_dir, cfg.baidu.api_key)
 
     # Workspace init: copy template files from workspace-init/ if missing (fresh user).
     # Sandbox gem (UID 1000) needs to write workspace files; root-owned 644 blocks
@@ -89,7 +95,8 @@ async def main() -> None:
             retry_backoff=tuple(cfg.sender.retry_backoff),
             max_concurrent=cfg.sender.max_concurrent,
         )
-
+        downloader = FeishuDownloader(client=lark_client, data_dir=data_dir)
+        
     agent_fn = build_agent_fn(
         sender=sender,
         workspace_dir=workspace_dir,
@@ -116,6 +123,7 @@ async def main() -> None:
         session_mgr=session_mgr,
         sender=sender,
         agent_fn=agent_fn,
+        downloader=downloader,
         idle_timeout=cfg.runner.idle_timeout_s,
         max_queue_size=cfg.runner.max_queue_size,
         data_dir=data_dir,
@@ -129,14 +137,14 @@ async def main() -> None:
     )
 
     # Start cron service
-    cron_storage = CronStorage(data_dir=data_dir, filelock_timeout=cfg.cron.filelock_timeout_s)
     cron_svc = CronService(
-        storage=cron_storage,
+        data_dir=workspace_dir,
         dispatch_fn=runner.dispatch,
-        check_interval=cfg.cron.check_interval_s,
+        tick_interval=cfg.cron.check_interval_s,
     )
     if cfg.cron.enabled:
         await cron_svc.start()
+        logger.info("定时任务服务已启动")
 
     # Start cleanup service
     cleanup_svc = CleanupService(
@@ -194,8 +202,18 @@ async def main() -> None:
     # Wait for shutdown signal
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, stop.set)
+
+    def _request_stop() -> None:
+        # ↑ 统一关闭请求入口
+        stop.set()
+
+    if sys.platform == "win32":
+        # ↑ Windows 不支持 loop.add_signal_handler，改用 signal.signal 捕获 Ctrl+C
+        signal.signal(signal.SIGINT, lambda _sig, _frame: loop.call_soon_threadsafe(_request_stop))
+    else:
+        # ↑ Unix/Linux/macOS 使用 asyncio 原生信号处理
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, _request_stop)
 
     await stop.wait()
     logger.info("shutdown signal received")

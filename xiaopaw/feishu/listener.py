@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from xiaopaw.feishu.session_key import resolve_routing_key
 from xiaopaw.models import Attachment, InboundMessage
-from xiaopaw.observability.metrics import inbound_total
+from xiaopaw.observability.metrics import record_inbound_message
 from xiaopaw.observability.security import RateLimiter, ReplayCache
 from xiaopaw.observability.trace import new_trace_id
 
@@ -108,14 +109,15 @@ class FeishuListener:
             content_raw = msg.content or "{}"
             import json
             content_dict = json.loads(content_raw)
-            text = content_dict.get("text", "")
+            # text = content_dict.get("text", "")
+            text = self._extract_content(msg.message_type, content_dict)
 
             attachment = None
             if msg.message_type == "image":
                 image_key = content_dict.get("image_key", "")
                 if image_key:
                     attachment = Attachment(
-                        msg_type="image", file_key=image_key, file_name=""
+                        msg_type="image", file_key=image_key, file_name=f"image_{image_key}.png"
                     )
             elif msg.message_type == "file":
                 file_key = content_dict.get("file_key", "")
@@ -136,12 +138,74 @@ class FeishuListener:
                 trace_id=new_trace_id(),
             )
 
-            inbound_total.labels(
-                source="feishu",
-                routing_type=routing_key.split(":")[0],
-            ).inc()
+            record_inbound_message("feishu", routing_key,
+            has_attachment=attachment is not None)
 
             await self._on_message(inbound)
 
         except Exception:
             logger.exception("failed to handle feishu message event")
+
+    @staticmethod
+    def _extract_post_text(content_dict: dict) -> str:
+        """从 post 消息的 content dict 中提取纯文本。
+
+        飞书 post 消息结构::
+
+            {
+              "zh_cn": {
+                "title": "标题（可选）",
+                "content": [
+                  [{"tag": "text", "text": "第一段"}, {"tag": "a", ...}],
+                  [{"tag": "text", "text": "第二段"}]
+                ]
+              }
+            }
+
+        提取逻辑：
+        - 优先取 zh_cn，不存在时取根对象
+        - 提取所有 tag == "text" 的 text 字段
+        - title 非空时拼接在最前面，与 content 间用换行分隔
+        - 返回 .strip() 后的结果
+        """
+        try:
+            node = content_dict.get("zh_cn") or content_dict
+            title = node.get("title") or "" if isinstance(node, dict) else ""
+            raw_content = node.get("content") if isinstance(node, dict) else None
+
+            if not isinstance(raw_content, list):
+                return ""
+
+            paragraph_texts: list[str] = []
+            for paragraph in raw_content:
+                if not isinstance(paragraph, list):
+                    continue
+                words = [
+                    elem.get("text", "")
+                    for elem in paragraph
+                    if isinstance(elem, dict) and elem.get("tag") == "text"
+                ]
+                paragraph_texts.append(" ".join(words))
+
+            body = " ".join(paragraph_texts)
+
+            if title:
+                return f"{title}\n{body}".strip()
+            return body.strip()
+        except Exception:  # noqa: BLE001
+            return ""
+
+    @staticmethod
+    def _extract_content(msg_type: str, content_dict: dict) -> str:
+        """根据消息类型从 content dict 中提取纯文本内容."""
+        if not content_dict:
+            return ""
+
+        if msg_type == "text":
+            return content_dict.get("text", "")
+
+        if msg_type == "post":
+            return FeishuListener._extract_post_text(content_dict)
+
+        # 其它类型先不做细分，统一交给上游决定如何处理
+        return ""

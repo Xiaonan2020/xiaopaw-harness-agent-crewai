@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import hashlib
 import logging
 from functools import cache
@@ -16,12 +17,31 @@ def _get_llm_client():
         from openai import OpenAI
         import os
         return OpenAI(
-            api_key=os.environ.get("QWEN_API_KEY", ""),
-            base_url=os.environ.get("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+            api_key=os.environ.get("EXTRACT_API_KEY", ""),
+            base_url=os.environ.get("EXTRACT_BASE_URL"),
         )
     except ImportError:
         logger.warning("openai package not installed, indexing disabled")
         return None
+
+@cache
+def _get_embed_client():
+    """Singleton OpenAI-compatible client for embeddings."""
+    try:
+        from openai import OpenAI
+        import os
+        return OpenAI(
+            api_key=os.environ.get("EMBEDDING_API_KEY", ""),
+            base_url=os.environ.get("EMBEDDING_BASE_URL"),
+        )
+    except ImportError:
+        logger.warning("openai package not installed, indexing disabled")
+        return None
+
+
+
+
+
 
 
 def _content_hash(session_id: str, turn_ts: int) -> str:
@@ -44,12 +64,16 @@ async def async_index_turn(
     client = _get_llm_client()
     if client is None:
         return
+    
+    embed_client = _get_embed_client()
+    if embed_client is None:
+        return
 
     try:
         content_id = _content_hash(session_id, turn_ts)
 
         summary_resp = client.chat.completions.create(
-            model="qwen-turbo",
+            model=os.environ.get("EXTRACT_MODEL"),
             messages=[
                 {"role": "system", "content": "用一句中文总结以下对话的核心内容，提取关键实体和主题标签。"},
                 {"role": "user", "content": f"用户：{user_message}\n助手：{assistant_reply[:500]}"},
@@ -58,10 +82,10 @@ async def async_index_turn(
         )
         summary = summary_resp.choices[0].message.content or ""
 
-        embed_resp = client.embeddings.create(
-            model="text-embedding-v3",
+        embed_resp = embed_client.embeddings.create(
+            model=os.environ.get("EMBEDDING_MODEL"),
             input=[summary, user_message],
-            dimensions=1024,
+            dimensions=os.environ.get("EMBEDDING_DIM"),
         )
         summary_vec = embed_resp.data[0].embedding
         message_vec = embed_resp.data[1].embedding

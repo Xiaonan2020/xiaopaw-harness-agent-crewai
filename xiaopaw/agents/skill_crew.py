@@ -18,6 +18,7 @@ Sub-Crew 在子线程跑，但 ContextVar（adapter / trace_id / span 栈）由 
 
 from __future__ import annotations
 
+import os
 import json
 import logging
 from pathlib import Path
@@ -100,7 +101,7 @@ def build_skill_crew(
     skill_instructions: str,
     session_id: str = "",
     sandbox_mcp_url: str = _DEFAULT_SANDBOX_MCP_URL,
-    sub_agent_model: str = "qwen3-max",
+    sub_agent_model: str = "gpt-5.4",
     max_iter: int = 20,
     allowed_tools: list[str] | None = None,
 ) -> Crew:
@@ -112,7 +113,12 @@ def build_skill_crew(
             f"Pass a valid URL (e.g. http://localhost:8030/mcp) or skip skill execution."
         )
     sandbox_mcp = MCPServerHTTP(url=sandbox_mcp_url)
-    skill_llm = AliyunLLM(model=sub_agent_model, region="cn", temperature=0.3)
+    skill_llm = AliyunLLM(model=os.getenv("MODEL", sub_agent_model), 
+                        api_key=os.getenv("OPENAI_API_KEY"),
+                        base_url=os.getenv("BASE_URL"),
+                        temperature=0.3)
+
+
 
     session_dir = f"/workspace/sessions/{session_id}" if session_id else "/workspace"
 

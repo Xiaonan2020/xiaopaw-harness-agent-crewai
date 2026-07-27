@@ -25,3 +25,7 @@ feishu.json
 workspace/*/output/
 .venv/
 venv/
+
+# 开发测试相关
+pgvector_data/
+code_test.py

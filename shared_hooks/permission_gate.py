@@ -41,7 +41,7 @@ class PermissionGate:
     @classmethod
     def from_yaml(cls, path: Path, audit=None):
         try:
-            with open(path) as f:
+            with open(path, "r", encoding="utf-8") as f:
                 config = yaml.safe_load(f)
         except (OSError, yaml.YAMLError) as e:
             raise ValueError(f"Failed to load permission config from {path}: {e}") from e

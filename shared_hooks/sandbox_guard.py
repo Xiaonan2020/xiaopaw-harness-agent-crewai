@@ -29,6 +29,10 @@ from urllib.parse import unquote
 
 from xiaopaw.hook_framework.registry import DenyReason, GuardrailDeny
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 # ── 4 组检测正则 ──────────────────────────────────────────────
 # 灵感来源：Claude Code 的 cyberRiskInstruction.ts —— 在工业实战里被反复打磨的清单
 
@@ -44,6 +48,7 @@ _DANGEROUS_COMMANDS = re.compile(
 
 # Shell 注入：分号、管道、AND 链、命令替换、子命令
 _SHELL_INJECTION = re.compile(r"[;|]|&&|`|\$\(")
+# _SHELL_INJECTION = re.compile(r"[;|]|&&|\$\(")
 
 # 环境变量引用：$VAR / ${VAR}（仅告警不拦截，因为合法用例多）
 _ENV_VAR = re.compile(r"\$\{?\w+\}?")
@@ -130,6 +135,9 @@ class SandboxGuard:
         # 沙箱原生工具豁免：sandbox_xxx / mcp_xxx 在隔离容器里跑 shell 是合法的
         if not _SANDBOX_TOOL_MARKER.search(ctx.tool_name) and _SHELL_INJECTION.search(text):
             self._record("shell_injection", ctx.tool_name, text)
+            logger.info(
+                f"=============================================================[SandboxGuard] WARNING: shell injection in input: ctx.tool_name={ctx.tool_name}---  {text}",
+            )   
             raise GuardrailDeny(DenyReason.SANDBOX_VIOLATION, "Shell injection detected")
 
         # 环境变量引用只告警不拦截（合法用例：用户让 Agent 读取配置）

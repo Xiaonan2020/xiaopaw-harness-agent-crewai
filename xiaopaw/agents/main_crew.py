@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import asyncio
 import logging
 import time
@@ -177,7 +178,10 @@ class MemoryAwareCrew:
         return Agent(
             **cfg,
             tools=[skill_tool, IntermediateTool()],
-            llm=AliyunLLM(model="qwen3-max", region="cn", temperature=0.3),
+            llm=AliyunLLM(model=os.getenv("MODEL", "gpt-5.4"), 
+                        api_key=os.getenv("OPENAI_API_KEY"),
+                        base_url=os.getenv("BASE_URL"),
+                        temperature=0.3),
             verbose=self._verbose,
         )
 
@@ -345,3 +349,4 @@ def build_agent_fn(
         return await crew_instance.run_and_index()
 
     return agent_fn
+

@@ -34,7 +34,8 @@ strategies:
 
   - name: sandbox_guard
     class: sandbox_guard.SandboxGuard
-    config: {}
+    config: 
+      audit_file: data/logs/security_audit.jsonl
     deps:
       audit: audit_logger
     hooks:

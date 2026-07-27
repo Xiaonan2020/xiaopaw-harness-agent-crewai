@@ -10,20 +10,20 @@ feishu:
   allowed_chats: []                  # 允许的群聊 ID（空 = 全部允许）
 
 agent:
-  model: "qwen3-max"
+  model: "${MODEL}"
   max_iter: 50
   max_input_tokens: 30000
-  sub_agent_model: "qwen3-max"
+  sub_agent_model: "${MODEL}"
   sub_agent_max_iter: 20
   timeout_s: 300
   llm_timeout_s: 120
 
 sandbox:
-  url: "http://localhost:8030/mcp"
+  url: "${SANDBOX_URL}"
   timeout_s: 120
 
 memory:
-  db_dsn: ""  # postgresql://user:pass@localhost:5432/xiaopaw
+  db_dsn: "${MEMORY_DB_DSN}"  # 环境变量: MEMORY_DB_DSN（优先）或 pgvector 数据库连接字符串
   hard_limit_lines: 250
   max_save_length: 2000
   compress_threshold: 0.45
@@ -52,10 +52,10 @@ observability:
   metrics_host: "0.0.0.0"
   metrics_port: 8090
   log_json: true
-  langfuse_host: "http://localhost:3000"
-  langfuse_public_key: ""   # 环境变量: XIAOPAW_LANGFUSE_PUBLIC_KEY（优先）或 LANGFUSE_PUBLIC_KEY
-  langfuse_secret_key: ""   # 环境变量: XIAOPAW_LANGFUSE_SECRET_KEY（优先）或 LANGFUSE_SECRET_KEY
-  enable_langfuse: true     # 环境变量: TRACE_TO_LANGFUSE=true
+  langfuse_host: "${LANGFUSE_BASE_URL}"
+  langfuse_public_key: "${LANGFUSE_PUBLIC_KEY}"   # 环境变量: XIAOPAW_LANGFUSE_PUBLIC_KEY（优先）或 LANGFUSE_PUBLIC_KEY
+  langfuse_secret_key: "${LANGFUSE_SECRET_KEY}"   # 环境变量: XIAOPAW_LANGFUSE_SECRET_KEY（优先）或 LANGFUSE_SECRET_KEY
+  enable_langfuse: "${TRACE_TO_LANGFUSE}"     # 环境变量: TRACE_TO_LANGFUSE=true
 
 rate_limit:
   per_user_per_minute: 20
@@ -87,3 +87,7 @@ feature_flags:
   enable_memory_save_filter: true
   enable_webhook_replay_cache: true
   enable_inbound_rate_limit: true
+
+baidu:
+  # enabled: true
+  api_key: "${BAIDU_API_KEY}"

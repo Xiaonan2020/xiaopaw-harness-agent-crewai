@@ -102,6 +102,7 @@ from crewai.tools import BaseTool
 from pydantic import BaseModel, Field, PrivateAttr, field_validator
 
 from xiaopaw.agents.skill_crew import build_skill_crew
+from xiaopaw.observability.metrics import record_skill_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -531,4 +532,10 @@ class SkillLoaderTool(BaseTool):
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(ctx.run, _run_with_cleanup)
             # 5 分钟超时——Sub-Crew 在沙箱里跑长任务的兜底
-            return future.result(timeout=300)
+            try:
+                return future.result(timeout=600)
+            except concurrent.futures.TimeoutError:
+                record_skill_timeout(skill_name)
+                raise TimeoutError(
+                    f"Skill {skill_name} execution timed out after 600s"
+                )

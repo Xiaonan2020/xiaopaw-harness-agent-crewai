@@ -753,14 +753,14 @@ class BaseSchemaValidator:
             return None, None  
 
         try:
-            with open(schema_path, "rb") as xsd_file:
+            with open(schema_path, "rb", encoding="utf-8") as xsd_file:
                 parser = lxml.etree.XMLParser()
                 xsd_doc = lxml.etree.parse(
                     xsd_file, parser=parser, base_url=str(schema_path)
                 )
                 schema = lxml.etree.XMLSchema(xsd_doc)
 
-            with open(xml_file, "r") as f:
+            with open(xml_file, "r", encoding="utf-8") as f:
                 xml_doc = lxml.etree.parse(f)
 
             xml_doc, _ = self._remove_template_tags_from_text_nodes(xml_doc)

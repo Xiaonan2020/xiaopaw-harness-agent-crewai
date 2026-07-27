@@ -132,6 +132,10 @@ docker exec xiaopaw-v2-aio-sandbox-1 stat -c "container=%i" /workspace
 
 ### Step 5：启动 pgvector（可选，记忆搜索需要）
 
+```
+docker compose -f pgvector-docker-compose.yaml up -d
+```
+
 如果只是体验基本对话，可以跳过这步。需要第 22 课的"三层记忆"中向量搜索功能时再启动。
 
 ```bash
@@ -233,6 +237,17 @@ curl http://127.0.0.1:9090/api/test/replies?routing_key=p2p:ou_test
 ---
 
 ## Langfuse 可观测（推荐）
+
+本地docker拉取git，到langfuse目录中启动docker
+
+```
+git clone https://github.com/langfuse/langfuse.git
+cd langfuse
+# 启动所有容器（Web + Worker + Postgres + Redis + ClickHouse + MinIO）
+docker compose up -d
+```
+
+
 
 XiaoPaw 集成了 Langfuse 全链路追踪，可以可视化每次对话的完整调用链（LLM 调用、工具执行、Sub-Crew 流程）。**第 33 课课文里的"Trace 树"截图就是从这里看到的。**
 

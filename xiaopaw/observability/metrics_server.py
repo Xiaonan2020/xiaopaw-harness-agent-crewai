@@ -8,6 +8,8 @@ import os
 
 from aiohttp import web
 
+from xiaopaw.observability.metrics import generate_metrics
+
 logger = logging.getLogger(__name__)
 
 
@@ -29,12 +31,12 @@ async def _metrics(request: web.Request) -> web.Response:
             return web.json_response({"error": "unauthorized"}, status=401)
 
     try:
-        from prometheus_client import generate_latest
-
-        body = generate_latest()
-        return web.Response(body=body, content_type="text/plain; charset=utf-8")
+        body = generate_metrics()
+        return web.Response(body=body, content_type="text/plain", charset="utf-8")
     except ImportError:
-        return web.json_response({"error": "prometheus_client not installed"}, status=501)
+        return web.json_response(
+            {"error": "prometheus_client not installed"}, status=501
+        )
 
 
 def create_metrics_app() -> web.Application:
@@ -44,11 +46,21 @@ def create_metrics_app() -> web.Application:
     return app
 
 
-async def start_metrics_server(host: str = "0.0.0.0", port: int = 8090) -> web.AppRunner:
+async def start_metrics_server(
+    host: str = "0.0.0.0", port: int = 8090
+) -> web.AppRunner:
     app = create_metrics_app()
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, host, port)
-    await site.start()
+    try:
+        site = web.TCPSite(runner, host, port)
+        await site.start()
+    except OSError as exc:
+        await runner.cleanup()
+        raise RuntimeError(
+            f"metrics server failed to bind to {host}:{port}: {exc}. "
+            "Please set a different port via observability.metrics_port in "
+            "config.yaml or ensure no other process is using this port."
+        ) from exc
     logger.info("metrics server listening on %s:%d", host, port)
     return runner

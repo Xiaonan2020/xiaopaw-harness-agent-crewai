@@ -9,15 +9,23 @@ import json
 import logging
 import os
 import re
+import time
 from pathlib import Path
 
 import requests
 from crewai import BaseLLM
 
+from xiaopaw.observability.metrics import (
+    observe_llm_latency,
+    record_error,
+    record_external_api_retry,
+    record_llm_call,
+)
+
 logger = logging.getLogger(__name__)
 
 _MCP_LIST_PARAMS = frozenset({"file_types"})
-_DEFAULT_TOOL_RESULT_MAX_CHARS = 12_000
+_DEFAULT_TOOL_RESULT_MAX_CHARS = 20_000
 _TRUNCATE_SUFFIX = (
     "\n\n[注意] 以上内容已被截断（原始长度超过 {max_chars} 字符）。"
     "如果需要完整内容，请考虑分段处理或使用文件操作工具。"
@@ -79,20 +87,21 @@ class AliyunLLM(BaseLLM):
         model: str,
         image_model: str | None = None,
         api_key: str | None = None,
+        base_url: str | None = None,
         region: str = "cn",
         temperature: float | None = None,
         timeout: int = 600,
         retry_count: int | None = None,
     ) -> None:
         super().__init__(model=model, temperature=temperature)
-        self.api_key = api_key or os.environ.get("QWEN_API_KEY") or os.environ.get("DASHSCOPE_API_KEY", "")
+        self.api_key = api_key or os.environ.get("OPENAI_API_KEY") or os.environ.get("DASHSCOPE_API_KEY", "")
         self.region = region
-        self.endpoint = ENDPOINTS.get(region, ENDPOINTS["cn"])
-        self.image_model = image_model or "qwen3-vl-plus"
+        self.endpoint = base_url or ENDPOINTS.get(region, ENDPOINTS["cn"])
+        self.image_model = image_model or "gpt-5.4"
         self.timeout = timeout
         self.retry_count = retry_count or int(os.environ.get("LLM_RETRY_COUNT", "2"))
-        self.debug_payload = os.environ.get("QWEN_DEBUG_PAYLOAD", "").lower() in ("1", "true")
-
+        self.debug_payload = os.environ.get("OPENAI_DEBUG_PAYLOAD", "").lower() in ("1", "true")
+        
     def supports_function_calling(self) -> bool:
         return True
 
@@ -190,67 +199,83 @@ class AliyunLLM(BaseLLM):
             "Authorization": f"Bearer {self.api_key}",
         }
 
+        status = "unknown"
+        start = time.monotonic()
         last_exc: Exception | None = None
-        for attempt in range(self.retry_count + 1):
-            try:
-                resp = requests.post(
-                    self.endpoint, json=payload, headers=headers, timeout=self.timeout
-                )
-                if resp.status_code >= 500:
-                    if attempt < self.retry_count:
-                        logger.warning("5xx (attempt %d): %s", attempt + 1, resp.status_code)
-                        continue
-                    resp.raise_for_status()
-                if resp.status_code == 429:
-                    if attempt < self.retry_count:
-                        logger.warning("rate limited (attempt %d)", attempt + 1)
-                        continue
-                    resp.raise_for_status()
-                if resp.status_code >= 400:
-                    logger.error("LLM error %d: %s", resp.status_code, resp.text[:500])
-                    resp.raise_for_status()
-
-                data = resp.json()
-                choice = data.get("choices", [{}])[0]
-                message = choice.get("message", {})
-                content = message.get("content", "")
-                raw_tool_calls = message.get("tool_calls")
-
-                if raw_tool_calls:
-                    if available_functions is not None:
-                        return self._handle_function_calls(
-                            raw_tool_calls, messages, tools, available_functions, max_iterations
-                        )
-                    return _normalize_mcp_tool_arguments(raw_tool_calls)
-
-                if not content and _retry_on_empty and _empty_retry_count < 2:
-                    return self.call(
-                        messages, tools=tools, callbacks=callbacks,
-                        available_functions=available_functions,
-                        max_iterations=max_iterations,
-                        _retry_on_empty=False,
-                        _empty_retry_count=_empty_retry_count + 1,
+        try:
+            for attempt in range(self.retry_count + 1):
+                try:
+                    resp = requests.post(
+                        self.endpoint, json=payload, headers=headers, timeout=self.timeout
                     )
+                    if resp.status_code >= 500:
+                        if attempt < self.retry_count:
+                            record_external_api_retry("llm")
+                            logger.warning("5xx (attempt %d): %s", attempt + 1, resp.status_code)
+                            continue
+                        resp.raise_for_status()
+                    if resp.status_code == 429:
+                        if attempt < self.retry_count:
+                            record_external_api_retry("llm")
+                            logger.warning("rate limited (attempt %d)", attempt + 1)
+                            continue
+                        resp.raise_for_status()
+                    if resp.status_code >= 400:
+                        logger.error("LLM error %d: %s", resp.status_code, resp.text[:500])
+                        resp.raise_for_status()
 
-                if callbacks:
-                    for cb in callbacks:
-                        if hasattr(cb, "on_llm_end"):
-                            cb.on_llm_end(response=content)
+                    data = resp.json()
+                    choice = data.get("choices", [{}])[0]
+                    message = choice.get("message", {})
+                    content = message.get("content", "")
+                    raw_tool_calls = message.get("tool_calls")
 
-                return content
+                    if raw_tool_calls:
+                        if available_functions is not None:
+                            return self._handle_function_calls(
+                                raw_tool_calls, messages, tools, available_functions, max_iterations
+                            )
+                        return _normalize_mcp_tool_arguments(raw_tool_calls)
 
-            except requests.Timeout:
-                last_exc = TimeoutError(f"LLM timeout after {self.timeout}s")
-                if attempt < self.retry_count:
-                    logger.warning("timeout (attempt %d)", attempt + 1)
-                    continue
-            except requests.RequestException as exc:
-                last_exc = exc
-                if attempt < self.retry_count:
-                    logger.warning("request error (attempt %d): %s", attempt + 1, exc)
-                    continue
+                    if not content and _retry_on_empty and _empty_retry_count < 2:
+                        return self.call(
+                            messages, tools=tools, callbacks=callbacks,
+                            available_functions=available_functions,
+                            max_iterations=max_iterations,
+                            _retry_on_empty=False,
+                            _empty_retry_count=_empty_retry_count + 1,
+                        )
 
-        raise last_exc or RuntimeError("LLM call failed after all retries")
+                    if callbacks:
+                        for cb in callbacks:
+                            if hasattr(cb, "on_llm_end"):
+                                cb.on_llm_end(response=content)
+
+                    status = "success"
+                    return content
+
+                except requests.Timeout:
+                    last_exc = TimeoutError(f"LLM timeout after {self.timeout}s")
+                    status = "timeout"
+                    if attempt < self.retry_count:
+                        record_external_api_retry("llm")
+                        logger.warning("timeout (attempt %d)", attempt + 1)
+                        continue
+                except requests.RequestException as exc:
+                    last_exc = exc
+                    status = type(exc).__name__
+                    if attempt < self.retry_count:
+                        record_external_api_retry("llm")
+                        logger.warning("request error (attempt %d): %s", attempt + 1, exc)
+                        continue
+
+            if last_exc is not None:
+                record_error("llm", type(last_exc).__name__)
+            raise last_exc or RuntimeError("LLM call failed after all retries")
+        finally:
+            elapsed = time.monotonic() - start
+            observe_llm_latency(self.model, elapsed)
+            record_llm_call(self.model, status)
 
     def _handle_function_calls(self, tool_calls, messages, tools, available_functions, max_iterations):
         messages = list(messages)

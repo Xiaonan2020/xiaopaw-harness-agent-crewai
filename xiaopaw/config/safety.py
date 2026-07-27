@@ -45,3 +45,5 @@ def assert_all_production_safe(cfg: AppConfig, *, is_dev: bool = False) -> None:
         )
 
     logger.info("all production safety checks passed")
+    print(violations)
+    

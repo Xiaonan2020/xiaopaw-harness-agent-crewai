@@ -5,31 +5,42 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List
 
+from filelock import FileLock, Timeout
+
 
 TASKS_PATH = Path("/workspace/cron/tasks.json")
+_TASKS_LOCK = FileLock(str(TASKS_PATH) + ".lock", timeout=10)
 
 
 def _load_store() -> Dict[str, Any]:
-    if not TASKS_PATH.exists():
-        return {"version": 1, "jobs": []}
     try:
-        data = json.loads(TASKS_PATH.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            raise ValueError("tasks.json root is not an object")
-        jobs = data.get("jobs")
-        if not isinstance(jobs, list):
-            raise ValueError("tasks.json.jobs is not an array")
-        return {"version": int(data.get("version", 1)), "jobs": list(jobs)}
+        with _TASKS_LOCK:
+            if not TASKS_PATH.exists():
+                return {"version": 1, "jobs": []}
+            data = json.loads(TASKS_PATH.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("tasks.json root is not an object")
+            jobs = data.get("jobs")
+            if not isinstance(jobs, list):
+                raise ValueError("tasks.json.jobs is not an array")
+            return {"version": int(data.get("version", 1)), "jobs": list(jobs)}
+    except Timeout as exc:
+        raise RuntimeError(f"tasks.json lock timeout: {exc}") from exc
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(f"failed to load tasks.json: {exc}") from exc
 
 
 def _dump_store(store: Dict[str, Any]) -> None:
-    TASKS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    content = json.dumps(store, ensure_ascii=False, indent=2)
-    tmp = TASKS_PATH.with_suffix(".tmp")
-    tmp.write_text(content, encoding="utf-8")
-    tmp.rename(TASKS_PATH)
+    try:
+        with _TASKS_LOCK:
+            TASKS_PATH.parent.mkdir(parents=True, exist_ok=True)
+            content = json.dumps(store, ensure_ascii=False, indent=2)
+            tmp = TASKS_PATH.with_suffix(".tmp")
+            tmp.write_text(content, encoding="utf-8")
+            tmp.replace(TASKS_PATH)
+            # ↑ Windows 下 rename 目标已存在会报错，replace 可原子覆盖
+    except Timeout as exc:
+        raise RuntimeError(f"tasks.json lock timeout: {exc}") from exc
 
 
 def _now_ms() -> int:

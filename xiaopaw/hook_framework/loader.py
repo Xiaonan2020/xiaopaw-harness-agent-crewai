@@ -48,7 +48,7 @@ class HookLoader:
             return
 
         try:
-            with open(yaml_path) as f:
+            with open(yaml_path, encoding="utf-8") as f:
                 config = yaml.safe_load(f)
         except yaml.YAMLError as e:
             print(f"[HookLoader] YAML parse error in {yaml_path}: {e}", file=sys.stderr)

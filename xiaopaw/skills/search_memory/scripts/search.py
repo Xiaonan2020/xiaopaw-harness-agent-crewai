@@ -28,13 +28,14 @@ DB_DSN = os.getenv(
     "MEMORY_DB_DSN",
     "postgresql://xiaopaw:xiaopaw123@localhost:5432/xiaopaw_memory",
 )
-QWEN_API_KEY = os.getenv("QWEN_API_KEY", "")
-EMBED_MODEL  = "text-embedding-v3"
-EMBED_DIM    = 1024
+EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY", "")
+EMBEDDING_BASE_URL = os.getenv("EMBEDDING_BASE_URL", "")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-v3")
+EMBEDDING_DIM = os.getenv("EMBEDDING_DIM", 1024)
 
 _embed_client = OpenAI(
-    api_key  = QWEN_API_KEY,
-    base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        api_key  = EMBEDDING_API_KEY,
+    base_url = EMBEDDING_BASE_URL,
 )
 
 
@@ -44,9 +45,9 @@ _embed_client = OpenAI(
 
 def embed_query(query: str) -> list[float]:
     resp = _embed_client.embeddings.create(
-        model      = EMBED_MODEL,
+        model      = EMBEDDING_MODEL,
         input      = [query],
-        dimensions = EMBED_DIM,
+        dimensions = EMBEDDING_DIM,
     )
     return resp.data[0].embedding
 

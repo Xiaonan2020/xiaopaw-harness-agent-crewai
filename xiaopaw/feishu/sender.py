@@ -6,8 +6,13 @@ import asyncio
 import json
 import logging
 
+from lark_oapi.ws import Client
 from xiaopaw.models import SenderProtocol
-from xiaopaw.observability.metrics import feishu_rate_limit_total
+from xiaopaw.observability.metrics import (
+    record_error,
+    record_external_api_retry,
+    record_feishu_rate_limit,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -15,10 +20,10 @@ FEISHU_RATE_LIMIT_CODES = {99991663, 99991672, 99991671}
 FEISHU_HTTP_RATE_LIMIT_STATUS = {429}
 
 
-class FeishuSender:
+class FeishuSender(SenderProtocol):
     def __init__(
         self,
-        client,
+        client: Client,
         max_retries: int = 3,
         retry_backoff: tuple[float, ...] = (1.0, 2.0, 4.0),
         max_concurrent: int = 5,
@@ -26,7 +31,7 @@ class FeishuSender:
         self._client = client
         self._max_retries = max_retries
         self._backoff = retry_backoff
-        self._sem = asyncio.Semaphore(max_concurrent)
+        self._sem = asyncio.Semaphore(max_concurrent) # 限制协程最大并发数量
 
     def _build_card(self, text: str) -> str:
         card = {
@@ -98,8 +103,9 @@ class FeishuSender:
                     self._client.im.v1.message.create, request
                 )
                 if response.code in FEISHU_RATE_LIMIT_CODES:
-                    feishu_rate_limit_total.inc()
+                    record_feishu_rate_limit()
                     if attempt < self._max_retries - 1:
+                        record_external_api_retry("feishu")
                         delay = self._backoff[min(attempt, len(self._backoff) - 1)]
                         await asyncio.sleep(delay)
                         continue
@@ -109,9 +115,12 @@ class FeishuSender:
             except Exception as exc:
                 last_exc = exc
                 if attempt < self._max_retries - 1:
+                    record_external_api_retry("feishu")
                     delay = self._backoff[min(attempt, len(self._backoff) - 1)]
                     await asyncio.sleep(delay)
 
+        if last_exc is not None:
+            record_error("feishu_sender", type(last_exc).__name__)
         raise last_exc or RuntimeError("feishu send failed")
 
     async def _update_card_with_retry(self, card_msg_id: str, content: str) -> None:

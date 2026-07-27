@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import json
 import logging
 from pathlib import Path
@@ -62,13 +63,45 @@ def maybe_compress(
 
 def _default_compress(messages: list[dict]) -> str:
     """Simple extractive summary fallback."""
-    parts: list[str] = []
-    for msg in messages:
-        role = msg.get("role", "")
-        content = msg.get("content", "")
-        if role in ("user", "assistant") and content:
-            parts.append(f"{role}: {content[:200]}")
-    return "\n".join(parts[-10:])
+    # parts: list[str] = []
+    # for msg in messages:
+    #     role = msg.get("role", "")
+    #     content = msg.get("content", "")
+    #     if role in ("user", "assistant") and content:
+    #         parts.append(f"{role}: {content[:200]}")
+    # return "\n".join(parts[-10:])
+
+    _SUMMARY_PROMPT = """\
+    将以下对话历史压缩为结构化摘要，只保留关键信息：
+    1. 用户目标：这段对话要完成什么
+    2. 关键事实：重要的结论、文件路径、操作结果
+    3. 未完成事项：尚未完成的任务（如有）
+
+    禁止包含：中间过程、失败尝试、重复内容。
+
+    对话历史：
+    {history}
+    """
+
+    try:
+        from crewai import LLM  # noqa: PLC0415
+        summary_llm = LLM(
+            model=os.getenv("EXTRACT_MODEL", "gpt-5.4"),
+            api_key=os.getenv("EXTRACT_API_KEY"),
+            base_url=os.getenv("EXTRACT_BASE_URL"),
+                          )
+        history = "\n".join(
+            f"{m.get('role', '')}: {str(m.get('content', ''))[:300]}"
+            for m in messages
+        )
+        return summary_llm.call([
+            {"role": "user", "content": _SUMMARY_PROMPT.format(history=history)}
+        ])
+    except Exception:  # noqa: BLE001
+        # 💡 宽泛捕获是设计决策：任何 LLM 调用失败都不应阻塞压缩流程。
+        #    压缩是优化，不是必要条件；降级为占位符比让整个对话崩溃要好。
+        logger.warning("_summarize_chunk failed, using fallback", exc_info=True)
+        return "[压缩失败，内容省略]"
 
 
 def load_session_ctx(session_id: str, ctx_dir: Path) -> list[dict]:
@@ -87,7 +120,8 @@ def save_session_ctx(session_id: str, messages: list[dict], ctx_dir: Path) -> No
     ctx_path = ctx_dir / f"{session_id}_ctx.json"
     tmp = ctx_path.with_suffix(".tmp")
     tmp.write_text(json.dumps(messages, ensure_ascii=False), encoding="utf-8")
-    tmp.rename(ctx_path)
+    tmp.replace(ctx_path)
+    # ↑ Windows 下 rename 目标已存在会报错，replace 可原子覆盖
 
 
 def append_session_raw(session_id: str, messages: list[dict], ctx_dir: Path) -> None:

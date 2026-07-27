@@ -35,7 +35,8 @@ class SecurityAuditLogger:
         elif audit_file:
             self._audit_file = Path(audit_file)
         else:
-            self._audit_file = None
+            # self._audit_file = None
+            self._audit_file = Path("data/logs/security_audit.jsonl")
         self._events: deque[dict] = deque(maxlen=10000)
 
     def record_event(self, security_event: str, **kwargs):
@@ -73,7 +74,7 @@ class SecurityAuditLogger:
         if self._audit_file is None:
             return
         try:
-            with open(self._audit_file, "a") as f:
+            with open(self._audit_file, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         except OSError as e:
             print(f"[SecurityAuditLogger] write error: {e}", file=sys.stderr)
